@@ -6718,128 +6718,130 @@ c_parser_do_statement (c_parser *parser, bool ivdep, unsigned short unroll)
   add_stmt (c_end_compound_stmt (loc, block, flag_isoc99));
 }
 
+typedef struct for_stmt
+{
+  bool is_foreach;
+  location_t location;
+  location_t incr_location;
+
+  tree init_expression;
+  /* The following are only used when parsing an ObjC foreach statement. */
+  tree object_expression;
+  /* Silence the bogus uninitialized warning. */
+  tree collection_expression;
+
+  tree conditions;
+  tree increments;
+  tree body;
+} for_stmt_t;
+
 /* Parse a condition expression inside a for statement */
-static tree
+static void
 c_parser_for_statement_condition (c_parser *parser, bool ivdep,
-                                  unsigned short unroll)
+  unsigned short unroll, for_stmt_t *for_stmt)
 {
   /* Parse the loop condition.  In the case of a foreach
      statement, there is no loop condition.  */
   gcc_assert (!parser->objc_could_be_foreach_context);
-  if (is_foreach_statement) return NULL_TREE;
+  if (is_foreach)
+    return;
 
-  tree cond;
   if (c_parser_next_token_is (parser, CPP_SEMICOLON))
   {
     if (ivdep)
     {
       c_parser_error (parser, "missing loop condition in loop "
             "with %<GCC ivdep%> pragma");
-      cond = error_mark_node;
+      for_stmt->conditions = error_mark_node;
     }
     else if (unroll)
     {
       c_parser_error (parser, "missing loop condition in loop "
             "with %<GCC unroll%> pragma");
-      cond = error_mark_node;
+      for_stmt->conditions = error_mark_node;
     }
     else
     {
       c_parser_consume_token (parser);
-      cond = NULL_TREE;
+      for_stmt->conditions = NULL_TREE;
     }
   }
   else
   {
-    cond = c_parser_condition (parser);
+    for_stmt->conditions = c_parser_condition (parser);
     c_parser_skip_until_found (parser, CPP_SEMICOLON,
         "expected %<;%>");
   }
   if (ivdep && cond != error_mark_node)
-    cond = build3 (ANNOTATE_EXPR, TREE_TYPE (cond), cond,
-        build_int_cst (integer_type_node,
-          annot_expr_ivdep_kind),
-        integer_zero_node);
+    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (cond), cond,
+        build_int_cst (integer_type_node, annot_expr_ivdep_kind),
+          integer_zero_node);
   if (unroll && cond != error_mark_node)
-    cond = build3 (ANNOTATE_EXPR, TREE_TYPE (cond), cond,
-        build_int_cst (integer_type_node,
-          annot_expr_unroll_kind),
-        build_int_cst (integer_type_node, unroll));
-
-  return cond;
+    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (cond), cond,
+        build_int_cst (integer_type_node, annot_expr_unroll_kind),
+          build_int_cst (integer_type_node, unroll));
 }
 
 /* Parse the init expression */
-static tree
-c_parser_for_statement_init_expression()
+static void
+c_parser_for_stmt_init_expression (c_parser *parser, for_stmt_t *for_stmt)
 {
   struct c_expr ce;
-  tree init_expression;
   ce = c_parser_expression (parser);
-  init_expression = ce.value;
+  for_stmt->init_expression = ce.value;
   parser->objc_could_be_foreach_context = false;
   if (c_parser_next_token_is_keyword (parser, RID_IN))
   {
     c_parser_consume_token (parser);
-    is_foreach_statement = true;
-    if (! lvalue_p (init_expression))
-    c_parser_error (parser, "invalid iterating variable in "
+    is_foreach = true;
+    if (! lvalue_p (for_stmt->init_expression))
+      c_parser_error (parser, "invalid iterating variable in "
           "fast enumeration");
-    object_expression
-      = c_fully_fold (init_expression, false, NULL);
+    for_stmt->object_expression
+      = c_fully_fold (for_stmt->init_expression, false, NULL);
   }
   else
   {
     ce = convert_lvalue_to_rvalue (loc, ce, true, false);
-    init_expression = ce.value;
-    c_finish_expr_stmt (loc, init_expression);
+    for_stmt->init_expression = ce.value;
+    c_finish_expr_stmt (loc, for_stmt->init_expression);
     c_parser_skip_until_found (parser, CPP_SEMICOLON,
           "expected %<;%>");
   }
-  return init_expression;
 }
 
 /* Parse the initialization declaration or expression.
-   for-statement-init
+    for-statement-inititalization:
+      ;
+      delaration in 
+      compiler_keywords
+    
+    compiler_keywords:
+      compiler_keywords __extension__ extension_name
+      __extension__ extension_name
+
 */
-static tree
-c_parser_for_stmt_initialization()
+static for_stmt_t
+c_parser_for_stmt_initialization (c_parser *parser,
+  for_stmt_t *for_stmt)
 {
-  /*   */
-  tree object_expression = error_mark_node;
   parser->objc_could_be_foreach_context = c_dialect_objc ();
   if (c_parser_next_token_is (parser, CPP_SEMICOLON))
   {
     parser->objc_could_be_foreach_context = false;
     c_parser_consume_token (parser);
-    c_finish_expr_stmt (loc, NULL_TREE);
+    c_finish_expr_stmt (location, NULL_TREE);
+    return;
   }
-  else if (c_parser_next_tokens_start_declaration (parser)
-          || c_parser_nth_token_starts_std_attributes (parser, 1))
+
+  /* __extension__ can start a declaration, but is also an
+    unary operator that can start an expression. Consume all
+    but the last of a possible series of __extension__ to
+    determine which.  */
+  if (c_parser_next_token_is_keyword (parser, RID_EXTENSION))
   {
-    c_parser_declaration_or_fndef (parser, true, true, true, true, true,
-            &object_expression);
-    parser->objc_could_be_foreach_context = false;
-    if (c_parser_next_token_is_keyword (parser, RID_IN))
-    {
-      c_parser_consume_token (parser);
-      is_foreach_statement = true;
-      if (check_for_loop_decls (for_loc, true) == NULL_TREE)
-          c_parser_error (parser, "multiple iterating variables in "
-                          "fast enumeration");
-    }
-    else
-      check_for_loop_decls (for_loc, flag_isoc99);
-  }
-  else if (c_parser_next_token_is_keyword (parser, RID_EXTENSION))
-  {
-    /* __extension__ can start a declaration, but is also an
-      unary operator that can start an expression.  Consume all
-      but the last of a possible series of __extension__ to
-      determine which.  */
     while (c_parser_peek_2nd_token (parser)->type == CPP_KEYWORD
-      && (c_parser_peek_2nd_token (parser)->keyword
-        == RID_EXTENSION))
+      && c_parser_peek_2nd_token (parser)->keyword == RID_EXTENSION)
       c_parser_consume_token (parser);
 
     if (c_token_starts_declaration (c_parser_peek_2nd_token (parser))
@@ -6848,27 +6850,73 @@ c_parser_for_stmt_initialization()
       int ext;
       ext = disable_extension_diagnostics ();
       c_parser_consume_token (parser);
-      c_parser_declaration_or_fndef (parser, true, true, true, true,
-              true, &object_expression);
+      c_parser_declaration_or_fndef (parser, true, true, true, true, true,
+            &for_stmt->object_expression);
       parser->objc_could_be_foreach_context = false;
-      
       restore_extension_diagnostics (ext);
-      if (c_parser_next_token_is_keyword (parser, RID_IN))
-      {
-        c_parser_consume_token (parser);
-        is_foreach_statement = true;
-        if (check_for_loop_decls (for_loc, true) == NULL_TREE)
-        c_parser_error (parser, "multiple iterating variables in "
-              "fast enumeration");
-      }
-      else
-        check_for_loop_decls (for_loc, flag_isoc99);
     }
     else
-      c_parser_for_statement_init_expression();
+    {
+      c_parser_for_stmt_init_expression (parser, for_stmt);
+      return;
+    }
+  }
+  else if (c_parser_next_tokens_start_declaration (parser)
+    || c_parser_nth_token_starts_std_attributes (parser, 1))
+  {
+    c_parser_declaration_or_fndef (parser, true, true, true, true, true,
+            &object_expression);
+    parser->objc_could_be_foreach_context = false;
   }
   else
-    c_parser_for_statement_init_expression();
+  {
+    c_parser_for_stmt_init_expression (parser, for_stmt);
+    return;
+  }
+
+  /* Continue parsing the initialization after a declaration */
+  if (c_parser_next_token_is_keyword (parser, RID_IN))
+  {
+    c_parser_consume_token (parser);
+    for_stmt->is_foreach = true;
+    if (check_for_loop_decls (for_stmt->location, true) == NULL_TREE)
+    c_parser_error (parser, "multiple iterating variables in "
+          "fast enumeration");
+  }
+  else
+    check_for_loop_decls (for_stmt->location, flag_isoc99);
+}
+
+/* Parse the increment expression (the third expression in a
+      for-statement). In the case of a foreach-statement, this is
+      the expression that follows the 'in'.  */
+static void
+c_parser_for_stmt_increments (c_parser *parser, for_stmt_t *for_stmt)
+{
+
+  for_stmt->incr_location = c_parser_peek_token (parser)->location;
+
+  if (c_parser_next_token_is (parser, CPP_CLOSE_PAREN))
+  {
+    if (for_stmt->is_foreach)
+    {
+      c_parser_error (parser, "missing collection in fast enumeration");
+      for_stmt->collection_expression = error_mark_node;
+    }
+    else
+      for_stmt->increments = c_process_expr_stmt (loc, NULL_TREE);
+  }
+  else
+  {
+    struct c_expr ce = c_parser_expression (parser);
+    if (for_stmt->is_foreach)
+      for_stmt->collection_expression = c_fully_fold (ce.value, false, NULL);
+    else
+    {
+      ce = convert_lvalue_to_rvalue (loc, ce, true, false);
+      for_stmt->increments = c_process_expr_stmt (loc, ce.value);
+    }
+  }
 }
 
 /* Parse a for statement (C90 6.6.5, C99 6.8.5, C11 6.8.5).
@@ -6934,64 +6982,45 @@ static void
 c_parser_for_statement (c_parser *parser, bool ivdep, unsigned short unroll,
       bool *if_p)
 {
-  tree block, cond, incr, body;
+  tree block;
   unsigned char save_in_statement;
   tree save_objc_foreach_break_label, save_objc_foreach_continue_label;
-  /* The following are only used when parsing an ObjC foreach statement.  */
-  tree object_expression;
-  /* Silence the bogus uninitialized warning.  */
-  tree collection_expression = NULL;
-  location_t loc = c_parser_peek_token (parser)->location;
-  location_t for_loc = loc;
-  bool is_foreach_statement = false;
+  
+  tree  = NULL;
+  location_t location = c_parser_peek_token (parser)->location;
+
   gcc_assert (c_parser_next_token_is_keyword (parser, RID_FOR));
   token_indent_info for_tinfo
     = get_token_indent_info (c_parser_peek_token (parser));
   c_parser_consume_token (parser);
+
   /* Open a compound statement in Objective-C as well, just in case this is
      as foreach expression.  */
   block = c_begin_compound_stmt (flag_isoc99 || c_dialect_objc ());
-  cond = error_mark_node;
-  incr = error_mark_node;
   matching_parens parens;
+
+  for_stmt_t for_stmt = {
+    .body = NULL_TREE,
+    .conditions = NULL_TREE,
+    .collection_expression = NULL_TREE,
+    .incr_location = location,
+    .increments = NULL_TREE,
+    .init_expression = NULL_TREE,
+    .is_foreach = false,
+    .location = location,
+    .object_expression = NULL_TREE,
+  };
 
   if (parens.require_open (parser))
   {
-    
-    c_parser_for_stmt_initialization();
-    cond = c_parser_for_statement_condition(parser, ivdep, unroll);
-  
-    /* Parse the increment expression (the third expression in a
-       for-statement).  In the case of a foreach-statement, this is
-       the expression that follows the 'in'.  */
-    loc = c_parser_peek_token (parser)->location;
-    if (c_parser_next_token_is (parser, CPP_CLOSE_PAREN))
-    {
-      if (is_foreach_statement)
-      {
-        c_parser_error (parser,
-            "missing collection in fast enumeration");
-        collection_expression = error_mark_node;
-      }
-      else
-        incr = c_process_expr_stmt (loc, NULL_TREE);
-    }
-    else
-    {
-      if (is_foreach_statement)
-        collection_expression
-          = c_fully_fold (c_parser_expression (parser).value, false, NULL);
-      else
-      {
-        struct c_expr ce = c_parser_expression (parser);
-        ce = convert_lvalue_to_rvalue (loc, ce, true, false);
-        incr = c_process_expr_stmt (loc, ce.value);
-      }
-    }
+    c_parser_for_stmt_initialization(parser, &for_stmt);
+    c_parser_for_stmt_condition(parser, ivdep, unroll, &for_stmt);
+    c_parser_for_stmt_increments(parser, &for_stmt);
     parens.skip_until_found_close (parser);
   }
+
   save_in_statement = in_statement;
-  if (is_foreach_statement)
+  if (is_foreach)
     {
       in_statement = IN_OBJC_FOREACH;
       save_objc_foreach_break_label = objc_foreach_break_label;
@@ -7009,7 +7038,7 @@ c_parser_for_statement (c_parser *parser, bool ivdep, unsigned short unroll,
   bool open_brace = c_parser_next_token_is (parser, CPP_OPEN_BRACE);
   body = c_parser_c99_block_statement (parser, if_p, &loc_after_labels);
 
-  if (is_foreach_statement)
+  if (is_foreach)
     objc_finish_foreach_loop (for_loc, object_expression,
 			      collection_expression, body,
 			      objc_foreach_break_label,
@@ -7030,7 +7059,7 @@ c_parser_for_statement (c_parser *parser, bool ivdep, unsigned short unroll,
 				    for_tinfo.location, RID_FOR);
 
   in_statement = save_in_statement;
-  if (is_foreach_statement)
+  if (is_foreach)
   {
     objc_foreach_break_label = save_objc_foreach_break_label;
     objc_foreach_continue_label = save_objc_foreach_continue_label;
