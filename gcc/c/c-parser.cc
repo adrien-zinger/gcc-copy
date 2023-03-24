@@ -238,8 +238,8 @@ struct GTY(()) c_parser {
 
   /* Keep track the variables in loops when the -Wfor-loop-checks flag
      is activated. When a for statement inner loop is resolved, check if
-	 at least one variable in the condition has been modifyed. */
-  struct ob
+	 at least one variable in the condition has been modifyed. TODO */
+  
 };
 
 /* Return a pointer to the Nth token in PARSERs tokens_buf.  */
@@ -6150,6 +6150,7 @@ c_parser_statement_after_labels (c_parser *parser, bool *if_p,
 	  c_parser_do_statement (parser, false, 0);
 	  break;
 	case RID_FOR:
+    printf("going to enter in a for statement\n");
 	  c_parser_for_statement (parser, false, 0, if_p);
 	  break;
 	case RID_GOTO:
@@ -6737,13 +6738,13 @@ typedef struct for_stmt
 
 /* Parse a condition expression inside a for statement */
 static void
-c_parser_for_statement_condition (c_parser *parser, bool ivdep,
+c_parser_for_stmt_conditions (c_parser *parser, bool ivdep,
   unsigned short unroll, for_stmt_t *for_stmt)
 {
   /* Parse the loop condition.  In the case of a foreach
      statement, there is no loop condition.  */
   gcc_assert (!parser->objc_could_be_foreach_context);
-  if (is_foreach)
+  if (for_stmt->is_foreach)
     return;
 
   if (c_parser_next_token_is (parser, CPP_SEMICOLON))
@@ -6772,12 +6773,13 @@ c_parser_for_statement_condition (c_parser *parser, bool ivdep,
     c_parser_skip_until_found (parser, CPP_SEMICOLON,
         "expected %<;%>");
   }
-  if (ivdep && cond != error_mark_node)
-    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (cond), cond,
+
+  if (ivdep && for_stmt->conditions != error_mark_node)
+    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (for_stmt->conditions), for_stmt->conditions,
         build_int_cst (integer_type_node, annot_expr_ivdep_kind),
           integer_zero_node);
-  if (unroll && cond != error_mark_node)
-    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (cond), cond,
+  if (unroll && for_stmt->conditions != error_mark_node)
+    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (for_stmt->conditions), for_stmt->conditions,
         build_int_cst (integer_type_node, annot_expr_unroll_kind),
           build_int_cst (integer_type_node, unroll));
 }
@@ -6793,7 +6795,7 @@ c_parser_for_stmt_init_expression (c_parser *parser, for_stmt_t *for_stmt)
   if (c_parser_next_token_is_keyword (parser, RID_IN))
   {
     c_parser_consume_token (parser);
-    is_foreach = true;
+    for_stmt->is_foreach = true;
     if (! lvalue_p (for_stmt->init_expression))
       c_parser_error (parser, "invalid iterating variable in "
           "fast enumeration");
@@ -6802,9 +6804,9 @@ c_parser_for_stmt_init_expression (c_parser *parser, for_stmt_t *for_stmt)
   }
   else
   {
-    ce = convert_lvalue_to_rvalue (loc, ce, true, false);
+    ce = convert_lvalue_to_rvalue (for_stmt->location, ce, true, false);
     for_stmt->init_expression = ce.value;
-    c_finish_expr_stmt (loc, for_stmt->init_expression);
+    c_finish_expr_stmt (for_stmt->location, for_stmt->init_expression);
     c_parser_skip_until_found (parser, CPP_SEMICOLON,
           "expected %<;%>");
   }
@@ -6821,7 +6823,7 @@ c_parser_for_stmt_init_expression (c_parser *parser, for_stmt_t *for_stmt)
       __extension__ extension_name
 
 */
-static for_stmt_t
+static void
 c_parser_for_stmt_initialization (c_parser *parser,
   for_stmt_t *for_stmt)
 {
@@ -6830,7 +6832,7 @@ c_parser_for_stmt_initialization (c_parser *parser,
   {
     parser->objc_could_be_foreach_context = false;
     c_parser_consume_token (parser);
-    c_finish_expr_stmt (location, NULL_TREE);
+    c_finish_expr_stmt (for_stmt->location, NULL_TREE);
     return;
   }
 
@@ -6865,7 +6867,7 @@ c_parser_for_stmt_initialization (c_parser *parser,
     || c_parser_nth_token_starts_std_attributes (parser, 1))
   {
     c_parser_declaration_or_fndef (parser, true, true, true, true, true,
-            &object_expression);
+            &for_stmt->object_expression);
     parser->objc_could_be_foreach_context = false;
   }
   else
@@ -6904,7 +6906,7 @@ c_parser_for_stmt_increments (c_parser *parser, for_stmt_t *for_stmt)
       for_stmt->collection_expression = error_mark_node;
     }
     else
-      for_stmt->increments = c_process_expr_stmt (loc, NULL_TREE);
+      for_stmt->increments = c_process_expr_stmt (for_stmt->location, NULL_TREE);
   }
   else
   {
@@ -6913,8 +6915,8 @@ c_parser_for_stmt_increments (c_parser *parser, for_stmt_t *for_stmt)
       for_stmt->collection_expression = c_fully_fold (ce.value, false, NULL);
     else
     {
-      ce = convert_lvalue_to_rvalue (loc, ce, true, false);
-      for_stmt->increments = c_process_expr_stmt (loc, ce.value);
+      ce = convert_lvalue_to_rvalue (for_stmt->location, ce, true, false);
+      for_stmt->increments = c_process_expr_stmt (for_stmt->location, ce.value);
     }
   }
 }
@@ -6985,8 +6987,7 @@ c_parser_for_statement (c_parser *parser, bool ivdep, unsigned short unroll,
   tree block;
   unsigned char save_in_statement;
   tree save_objc_foreach_break_label, save_objc_foreach_continue_label;
-  
-  tree  = NULL;
+
   location_t location = c_parser_peek_token (parser)->location;
 
   gcc_assert (c_parser_next_token_is_keyword (parser, RID_FOR));
@@ -6994,40 +6995,42 @@ c_parser_for_statement (c_parser *parser, bool ivdep, unsigned short unroll,
     = get_token_indent_info (c_parser_peek_token (parser));
   c_parser_consume_token (parser);
 
+  bool is_isoc99_or_objc = flag_isoc99 || c_dialect_objc ();
+
   /* Open a compound statement in Objective-C as well, just in case this is
      as foreach expression.  */
-  block = c_begin_compound_stmt (flag_isoc99 || c_dialect_objc ());
+  block = c_begin_compound_stmt (is_isoc99_or_objc);
   matching_parens parens;
 
-  for_stmt_t for_stmt = {
-    .body = NULL_TREE,
-    .conditions = NULL_TREE,
-    .collection_expression = NULL_TREE,
-    .incr_location = location,
-    .increments = NULL_TREE,
-    .init_expression = NULL_TREE,
-    .is_foreach = false,
-    .location = location,
-    .object_expression = NULL_TREE,
-  };
+  for_stmt_t for_stmt;
+  for_stmt.body = NULL_TREE;
+  for_stmt.conditions = NULL_TREE;
+  for_stmt.collection_expression = NULL_TREE;
+  for_stmt.incr_location = location;
+  for_stmt.increments = NULL_TREE;
+  for_stmt.init_expression = NULL_TREE;
+  for_stmt.is_foreach = false;
+  for_stmt.location = location;
+  for_stmt.object_expression = NULL_TREE;
+
 
   if (parens.require_open (parser))
   {
-    c_parser_for_stmt_initialization(parser, &for_stmt);
-    c_parser_for_stmt_condition(parser, ivdep, unroll, &for_stmt);
-    c_parser_for_stmt_increments(parser, &for_stmt);
+    c_parser_for_stmt_initialization (parser, &for_stmt);
+    c_parser_for_stmt_conditions (parser, ivdep, unroll, &for_stmt);
+    c_parser_for_stmt_increments (parser, &for_stmt);
     parens.skip_until_found_close (parser);
   }
 
   save_in_statement = in_statement;
-  if (is_foreach)
-    {
-      in_statement = IN_OBJC_FOREACH;
-      save_objc_foreach_break_label = objc_foreach_break_label;
-      save_objc_foreach_continue_label = objc_foreach_continue_label;
-      objc_foreach_break_label = create_artificial_label (loc);
-      objc_foreach_continue_label = create_artificial_label (loc);
-    }
+  if (for_stmt.is_foreach)
+  {
+    in_statement = IN_OBJC_FOREACH;
+    save_objc_foreach_break_label = objc_foreach_break_label;
+    save_objc_foreach_continue_label = objc_foreach_continue_label;
+    objc_foreach_break_label = create_artificial_label (for_stmt.location);
+    objc_foreach_continue_label = create_artificial_label (for_stmt.location);
+  }
   else
     in_statement = IN_ITERATION_STMT;
 
@@ -7036,30 +7039,31 @@ c_parser_for_statement (c_parser *parser, bool ivdep, unsigned short unroll,
 
   location_t loc_after_labels;
   bool open_brace = c_parser_next_token_is (parser, CPP_OPEN_BRACE);
-  body = c_parser_c99_block_statement (parser, if_p, &loc_after_labels);
+  for_stmt.body = c_parser_c99_block_statement (parser, if_p, &loc_after_labels);
 
-  if (is_foreach)
-    objc_finish_foreach_loop (for_loc, object_expression,
-			      collection_expression, body,
-			      objc_foreach_break_label,
-			      objc_foreach_continue_label);
+  if (for_stmt.is_foreach)
+    objc_finish_foreach_loop (for_stmt.location, for_stmt.object_expression,
+            for_stmt.collection_expression, for_stmt.body,
+            objc_foreach_break_label,
+            objc_foreach_continue_label);
   else
-    add_stmt (build_stmt (for_loc, FOR_STMT, NULL_TREE, cond, incr,
-			  body, NULL_TREE));
-  add_stmt (c_end_compound_stmt (for_loc, block,
-				 flag_isoc99 || c_dialect_objc ()));
+    add_stmt (build_stmt (for_stmt.location, FOR_STMT, NULL_TREE, for_stmt.conditions, for_stmt.increments,
+        for_stmt.body, NULL_TREE));
+
+  add_stmt (c_end_compound_stmt (for_stmt.location, block, is_isoc99_or_objc));
   c_parser_maybe_reclassify_token (parser);
 
   token_indent_info next_tinfo
     = get_token_indent_info (c_parser_peek_token (parser));
+
   warn_for_misleading_indentation (for_tinfo, body_tinfo, next_tinfo);
 
   if (next_tinfo.type != CPP_SEMICOLON && !open_brace)
     warn_for_multistatement_macros (loc_after_labels, next_tinfo.location,
-				    for_tinfo.location, RID_FOR);
+            for_tinfo.location, RID_FOR);
 
   in_statement = save_in_statement;
-  if (is_foreach)
+  if (for_stmt.is_foreach)
   {
     objc_foreach_break_label = save_objc_foreach_break_label;
     objc_foreach_continue_label = save_objc_foreach_continue_label;
@@ -7670,8 +7674,9 @@ c_parser_expr_no_commas (c_parser *parser, struct c_expr *after,
 
 static struct c_expr
 c_parser_conditional_expression (c_parser *parser, struct c_expr *after,
-				 tree omp_atomic_lhs)
+          tree omp_atomic_lhs)
 {
+  printf("enter c_parser_conditional expr\n");
   struct c_expr cond, exp1, exp2, ret;
   location_t start, cond_loc, colon_loc;
 
@@ -7681,65 +7686,72 @@ c_parser_conditional_expression (c_parser *parser, struct c_expr *after,
 
   if (c_parser_next_token_is_not (parser, CPP_QUERY))
     return cond;
+
   if (cond.value != error_mark_node)
     start = cond.get_start ();
   else
     start = UNKNOWN_LOCATION;
+
   cond_loc = c_parser_peek_token (parser)->location;
   cond = convert_lvalue_to_rvalue (cond_loc, cond, true, true);
   c_parser_consume_token (parser);
-  if (c_parser_next_token_is (parser, CPP_COLON))
-    {
-      tree eptype = NULL_TREE;
 
-      location_t middle_loc = c_parser_peek_token (parser)->location;
-      pedwarn (middle_loc, OPT_Wpedantic,
-	       "ISO C forbids omitting the middle term of a %<?:%> expression");
-      if (TREE_CODE (cond.value) == EXCESS_PRECISION_EXPR)
-	{
-	  eptype = TREE_TYPE (cond.value);
-	  cond.value = TREE_OPERAND (cond.value, 0);
-	}
-      tree e = cond.value;
-      while (TREE_CODE (e) == COMPOUND_EXPR)
-	e = TREE_OPERAND (e, 1);
-      warn_for_omitted_condop (middle_loc, e);
-      /* Make sure first operand is calculated only once.  */
-      exp1.value = save_expr (default_conversion (cond.value));
-      if (eptype)
-	exp1.value = build1 (EXCESS_PRECISION_EXPR, eptype, exp1.value);
-      exp1.original_type = NULL;
-      exp1.src_range = cond.src_range;
-      cond.value = c_objc_common_truthvalue_conversion (cond_loc, exp1.value);
-      c_inhibit_evaluation_warnings += cond.value == truthvalue_true_node;
-    }
-  else
+  if (c_parser_next_token_is (parser, CPP_COLON))
+  {
+    tree eptype = NULL_TREE;
+
+    location_t middle_loc = c_parser_peek_token (parser)->location;
+    pedwarn (middle_loc, OPT_Wpedantic,
+        "ISO C forbids omitting the middle term of a %<?:%> expression");
+    if (TREE_CODE (cond.value) == EXCESS_PRECISION_EXPR)
     {
-      cond.value
-	= c_objc_common_truthvalue_conversion
-	(cond_loc, default_conversion (cond.value));
+      eptype = TREE_TYPE (cond.value);
+      cond.value = TREE_OPERAND (cond.value, 0);
+    }
+
+    tree e = cond.value;
+    while (TREE_CODE (e) == COMPOUND_EXPR)
+      e = TREE_OPERAND (e, 1);
+
+    warn_for_omitted_condop (middle_loc, e);
+
+    /* Make sure first operand is calculated only once.  */
+    exp1.value = save_expr (default_conversion (cond.value));
+    if (eptype)
+      exp1.value = build1 (EXCESS_PRECISION_EXPR, eptype, exp1.value);
+
+    exp1.original_type = NULL;
+    exp1.src_range = cond.src_range;
+    cond.value = c_objc_common_truthvalue_conversion (cond_loc, exp1.value);
+    c_inhibit_evaluation_warnings += cond.value == truthvalue_true_node;
+  }
+  else
+  {
+      cond.value = c_objc_common_truthvalue_conversion (cond_loc,
+            default_conversion (cond.value));
       c_inhibit_evaluation_warnings += cond.value == truthvalue_false_node;
       exp1 = c_parser_expression_conv (parser);
       mark_exp_read (exp1.value);
-      c_inhibit_evaluation_warnings +=
-	((cond.value == truthvalue_true_node)
-	 - (cond.value == truthvalue_false_node));
-    }
+      c_inhibit_evaluation_warnings += ((cond.value == truthvalue_true_node)
+            - (cond.value == truthvalue_false_node));
+  }
 
   colon_loc = c_parser_peek_token (parser)->location;
   if (!c_parser_require (parser, CPP_COLON, "expected %<:%>"))
-    {
-      c_inhibit_evaluation_warnings -= cond.value == truthvalue_true_node;
-      ret.set_error ();
-      ret.original_code = ERROR_MARK;
-      ret.original_type = NULL;
-      return ret;
-    }
+  {
+    c_inhibit_evaluation_warnings -= cond.value == truthvalue_true_node;
+    ret.set_error ();
+    ret.original_code = ERROR_MARK;
+    ret.original_type = NULL;
+    return ret;
+  }
+
   {
     location_t exp2_loc = c_parser_peek_token (parser)->location;
     exp2 = c_parser_conditional_expression (parser, NULL, NULL_TREE);
     exp2 = convert_lvalue_to_rvalue (exp2_loc, exp2, true, true);
   }
+
   c_inhibit_evaluation_warnings -= cond.value == truthvalue_true_node;
   location_t loc1 = make_location (exp1.get_start (), exp1.src_range);
   location_t loc2 = make_location (exp2.get_start (), exp2.src_range);
@@ -7779,6 +7791,139 @@ c_parser_conditional_expression (c_parser *parser, struct c_expr *after,
     }
   set_c_expr_source_range (&ret, start, exp2.get_finish ());
   return ret;
+}
+
+/* A binary expression is parsed using operator-precedence parsing, with the
+  operands being cast expressions.  All the binary operators are
+  left-associative.  Thus a binary expression is of form:
+
+  E0 op1 E1 op2 E2 ...
+
+  which we represent on a stack.  On the stack, the precedence levels are
+  strictly increasing.  When a new operator is encountered of higher precedence
+  than that at the top of the stack, it is pushed; its Left-Hand Side is the top
+  expression, and its Right-Hand Side is everything parsed until it is popped.
+  When a new operator is encountered with precedence less than or equal to that
+  at the top of the stack, triples E[i-1] op[i] E[i] are popped and replaced by
+  the result of the operation until the operator at the top of the stack has
+  lower precedence than the new operator or there is only one element on the
+  stack; then the top expression is the LHS of the new operator.  In the case of
+  logical AND and OR expressions, we also need to adjust
+  c_inhibit_evaluation_warnings as appropriate when the operators are pushed and
+  popped.
+
+  We conclude that the size of such a stack will be the same as the maximum of
+  binary operation precedence levels, given by NUM_PRECS. */
+typedef struct binary_expr_stack {
+  /* The expression at this stack level.  */
+  struct c_expr expr;
+  /* The precedence of the operator on its left, PREC_NONE at the
+      bottom of the stack.  */
+  enum c_parser_prec prec;
+  /* The operation on its left.  */
+  enum tree_code op;
+  /* The source location of this operation.  */
+  location_t loc;
+  /* The sizeof argument if expr.original_code == {PAREN_,}SIZEOF_EXPR.  */
+  tree sizeof_arg;
+} binary_expr_stack_t;
+
+static void
+pop_binary_expr_stack (binary_expr_stack_t *stack)
+{
+  do
+  {
+    switch (stack[sp].op)
+    {
+      case TRUTH_ANDIF_EXPR:
+        c_inhibit_evaluation_warnings -= (stack[sp - 1]->expr.value
+           == truthvalue_false_node);
+        break;
+      case TRUTH_ORIF_EXPR:
+        c_inhibit_evaluation_warnings -= (stack[sp - 1]->expr.value
+            == truthvalue_true_node);
+        break;
+      case TRUNC_DIV_EXPR:
+        if ((stack[sp - 1].expr.original_code == SIZEOF_EXPR
+            || stack[sp - 1].expr.original_code == PAREN_SIZEOF_EXPR)
+            && (stack[sp].expr.original_code == SIZEOF_EXPR
+            || stack[sp].expr.original_code == PAREN_SIZEOF_EXPR))
+        {
+          tree type0 = stack[sp - 1].sizeof_arg;
+          tree type1 = stack[sp].sizeof_arg;
+          tree first_arg = type0;
+          if (!TYPE_P (type0))
+            type0 = TREE_TYPE (type0);
+
+          if (!TYPE_P (type1))
+            type1 = TREE_TYPE (type1);
+
+          if (POINTER_TYPE_P (type0) && comptypes (TREE_TYPE (type0), type1)
+              && !(TREE_CODE (first_arg) == PARM_DECL
+              && C_ARRAY_PARAMETER (first_arg)
+              && warn_sizeof_array_argument))
+          {
+            auto_diagnostic_group d;
+            if (warning_at (stack[sp].loc, OPT_Wsizeof_pointer_div,
+                "division %<sizeof (%T) / sizeof (%T)%> "
+                "does not compute the number of array "
+                "elements", type0, type1))
+            if (DECL_P (first_arg))
+              inform (DECL_SOURCE_LOCATION (first_arg),
+                  "first %<sizeof%> operand was declared here");  
+          }
+          else if (TREE_CODE (type0) == ARRAY_TYPE
+              && !char_type_p (TYPE_MAIN_VARIANT (TREE_TYPE (type0)))
+              && stack[sp].expr.original_code != PAREN_SIZEOF_EXPR)
+            maybe_warn_sizeof_array_div (stack[sp].loc, first_arg, type0,
+              stack[sp].sizeof_arg, type1);
+    }
+  break;
+      default:
+  break;
+      }
+    stack[sp - 1].expr
+      = convert_lvalue_to_rvalue (stack[sp - 1].loc,
+          stack[sp - 1].expr, true, true);
+    stack[sp].expr
+      = convert_lvalue_to_rvalue (stack[sp].loc,
+          stack[sp].expr, true, true);
+    if (__builtin_expect (omp_atomic_lhs != NULL_TREE, 0) && sp == 1
+  && ((c_parser_next_token_is (parser, CPP_SEMICOLON)
+        && ((1 << stack[sp].prec)
+      & ((1 << PREC_BITOR) | (1 << PREC_BITXOR)
+          | (1 << PREC_BITAND) | (1 << PREC_SHIFT)
+          | (1 << PREC_ADD) | (1 << PREC_MULT)
+          | (1 << PREC_EQ))))
+      || ((c_parser_next_token_is (parser, CPP_QUERY)
+      || (omp_atomic_lhs == void_list_node
+          && c_parser_next_token_is (parser, CPP_CLOSE_PAREN)))
+    && (stack[sp].prec == PREC_REL || stack[sp].prec == PREC_EQ)))
+  && stack[sp].op != TRUNC_MOD_EXPR
+  && stack[sp].op != GE_EXPR
+  && stack[sp].op != LE_EXPR
+  && stack[sp].op != NE_EXPR
+  && stack[0].expr.value != error_mark_node
+  && stack[1].expr.value != error_mark_node			      
+  && (omp_atomic_lhs == void_list_node				      
+      || c_tree_equal (stack[0].expr.value, omp_atomic_lhs)	      
+      || c_tree_equal (stack[1].expr.value, omp_atomic_lhs)	      
+      || (stack[sp].op == EQ_EXPR					      
+    && c_parser_peek_2nd_token (parser)->keyword == RID_IF)))     
+      {									      
+  tree t = make_node (stack[1].op);				      
+  TREE_TYPE (t) = TREE_TYPE (stack[0].expr.value);		      
+  TREE_OPERAND (t, 0) = stack[0].expr.value;			      
+  TREE_OPERAND (t, 1) = stack[1].expr.value;			      
+  stack[0].expr.value = t;					      
+      }									      
+    else								      
+      stack[sp - 1].expr = parser_build_binary_op (stack[sp].loc,	      
+                stack[sp].op,	      
+                stack[sp - 1].expr,	      
+                stack[sp].expr);	      
+    sp--;								      
+} while (0)
 }
 
 /* Parse a binary expression; that is, a logical-OR-expression (C90
@@ -7845,136 +7990,12 @@ static struct c_expr
 c_parser_binary_expression (c_parser *parser, struct c_expr *after,
 			    tree omp_atomic_lhs)
 {
-  /* A binary expression is parsed using operator-precedence parsing,
-     with the operands being cast expressions.  All the binary
-     operators are left-associative.  Thus a binary expression is of
-     form:
+  binary_expr_stack_t stack[NUM_PRECS];
 
-     E0 op1 E1 op2 E2 ...
-
-     which we represent on a stack.  On the stack, the precedence
-     levels are strictly increasing.  When a new operator is
-     encountered of higher precedence than that at the top of the
-     stack, it is pushed; its LHS is the top expression, and its RHS
-     is everything parsed until it is popped.  When a new operator is
-     encountered with precedence less than or equal to that at the top
-     of the stack, triples E[i-1] op[i] E[i] are popped and replaced
-     by the result of the operation until the operator at the top of
-     the stack has lower precedence than the new operator or there is
-     only one element on the stack; then the top expression is the LHS
-     of the new operator.  In the case of logical AND and OR
-     expressions, we also need to adjust c_inhibit_evaluation_warnings
-     as appropriate when the operators are pushed and popped.  */
-
-  struct {
-    /* The expression at this stack level.  */
-    struct c_expr expr;
-    /* The precedence of the operator on its left, PREC_NONE at the
-       bottom of the stack.  */
-    enum c_parser_prec prec;
-    /* The operation on its left.  */
-    enum tree_code op;
-    /* The source location of this operation.  */
-    location_t loc;
-    /* The sizeof argument if expr.original_code == {PAREN_,}SIZEOF_EXPR.  */
-    tree sizeof_arg;
-  } stack[NUM_PRECS];
   int sp;
   /* Location of the binary operator.  */
   location_t binary_loc = UNKNOWN_LOCATION;  /* Quiet warning.  */
-#define POP								      \
-  do {									      \
-    switch (stack[sp].op)						      \
-      {									      \
-      case TRUTH_ANDIF_EXPR:						      \
-	c_inhibit_evaluation_warnings -= (stack[sp - 1].expr.value	      \
-					  == truthvalue_false_node);	      \
-	break;								      \
-      case TRUTH_ORIF_EXPR:						      \
-	c_inhibit_evaluation_warnings -= (stack[sp - 1].expr.value	      \
-					  == truthvalue_true_node);	      \
-	break;								      \
-      case TRUNC_DIV_EXPR:						      \
-	if ((stack[sp - 1].expr.original_code == SIZEOF_EXPR		      \
-	     || stack[sp - 1].expr.original_code == PAREN_SIZEOF_EXPR)	      \
-	    && (stack[sp].expr.original_code == SIZEOF_EXPR		      \
-		|| stack[sp].expr.original_code == PAREN_SIZEOF_EXPR))	      \
-	  {								      \
-	    tree type0 = stack[sp - 1].sizeof_arg;			      \
-	    tree type1 = stack[sp].sizeof_arg;				      \
-	    tree first_arg = type0;					      \
-	    if (!TYPE_P (type0))					      \
-	      type0 = TREE_TYPE (type0);				      \
-	    if (!TYPE_P (type1))					      \
-	      type1 = TREE_TYPE (type1);				      \
-	    if (POINTER_TYPE_P (type0)					      \
-		&& comptypes (TREE_TYPE (type0), type1)			      \
-		&& !(TREE_CODE (first_arg) == PARM_DECL			      \
-		     && C_ARRAY_PARAMETER (first_arg)			      \
-		     && warn_sizeof_array_argument))			      \
-	      {								      \
-		auto_diagnostic_group d;				      \
-		if (warning_at (stack[sp].loc, OPT_Wsizeof_pointer_div,	      \
-				  "division %<sizeof (%T) / sizeof (%T)%> "   \
-				  "does not compute the number of array "     \
-				  "elements",				      \
-				  type0, type1))			      \
-		  if (DECL_P (first_arg))				      \
-		    inform (DECL_SOURCE_LOCATION (first_arg),		      \
-			      "first %<sizeof%> operand was declared here");  \
-	      }								      \
-	    else if (TREE_CODE (type0) == ARRAY_TYPE			      \
-		     && !char_type_p (TYPE_MAIN_VARIANT (TREE_TYPE (type0)))  \
-		     && stack[sp].expr.original_code != PAREN_SIZEOF_EXPR)    \
-	      maybe_warn_sizeof_array_div (stack[sp].loc, first_arg, type0,   \
-					   stack[sp].sizeof_arg, type1);      \
-	  }								      \
-	break;								      \
-      default:								      \
-	break;								      \
-      }									      \
-    stack[sp - 1].expr							      \
-      = convert_lvalue_to_rvalue (stack[sp - 1].loc,			      \
-				  stack[sp - 1].expr, true, true);	      \
-    stack[sp].expr							      \
-      = convert_lvalue_to_rvalue (stack[sp].loc,			      \
-				  stack[sp].expr, true, true);		      \
-    if (__builtin_expect (omp_atomic_lhs != NULL_TREE, 0) && sp == 1	      \
-	&& ((c_parser_next_token_is (parser, CPP_SEMICOLON)		      \
-	     && ((1 << stack[sp].prec)					      \
-		 & ((1 << PREC_BITOR) | (1 << PREC_BITXOR)		      \
-		     | (1 << PREC_BITAND) | (1 << PREC_SHIFT)		      \
-		     | (1 << PREC_ADD) | (1 << PREC_MULT)		      \
-		     | (1 << PREC_EQ))))				      \
-	    || ((c_parser_next_token_is (parser, CPP_QUERY)		      \
-		 || (omp_atomic_lhs == void_list_node			      \
-		     && c_parser_next_token_is (parser, CPP_CLOSE_PAREN)))    \
-		&& (stack[sp].prec == PREC_REL || stack[sp].prec == PREC_EQ)))\
-	&& stack[sp].op != TRUNC_MOD_EXPR				      \
-	&& stack[sp].op != GE_EXPR					      \
-	&& stack[sp].op != LE_EXPR					      \
-	&& stack[sp].op != NE_EXPR					      \
-	&& stack[0].expr.value != error_mark_node			      \
-	&& stack[1].expr.value != error_mark_node			      \
-	&& (omp_atomic_lhs == void_list_node				      \
-	    || c_tree_equal (stack[0].expr.value, omp_atomic_lhs)	      \
-	    || c_tree_equal (stack[1].expr.value, omp_atomic_lhs)	      \
-	    || (stack[sp].op == EQ_EXPR					      \
-		&& c_parser_peek_2nd_token (parser)->keyword == RID_IF)))     \
-      {									      \
-	tree t = make_node (stack[1].op);				      \
-	TREE_TYPE (t) = TREE_TYPE (stack[0].expr.value);		      \
-	TREE_OPERAND (t, 0) = stack[0].expr.value;			      \
-	TREE_OPERAND (t, 1) = stack[1].expr.value;			      \
-	stack[0].expr.value = t;					      \
-      }									      \
-    else								      \
-      stack[sp - 1].expr = parser_build_binary_op (stack[sp].loc,	      \
-						   stack[sp].op,	      \
-						   stack[sp - 1].expr,	      \
-						   stack[sp].expr);	      \
-    sp--;								      \
-  } while (0)
+
   gcc_assert (!after || c_dialect_objc ());
   stack[0].loc = c_parser_peek_token (parser)->location;
   stack[0].expr = c_parser_cast_expression (parser, after);
@@ -8019,6 +8040,7 @@ c_parser_binary_expression (c_parser *parser, struct c_expr *after,
 	  ocode = RSHIFT_EXPR;
 	  break;
 	case CPP_LESS:
+    printf("cpp less\n");
 	  oprec = PREC_REL;
 	  ocode = LT_EXPR;
 	  break;
@@ -10766,6 +10788,7 @@ c_parser_postfix_expression_after_primary (c_parser *parser,
 static struct c_expr
 c_parser_expression (c_parser *parser)
 {
+  printf("enter parser expression\n");
   location_t tloc = c_parser_peek_token (parser)->location;
   struct c_expr expr;
   expr = c_parser_expr_no_commas (parser, NULL);
