@@ -6407,12 +6407,12 @@ static void
 used_types_insert_helper (tree type, struct function *func)
 {
   if (type != NULL && func != NULL)
-    {
-      if (func->used_types_hash == NULL)
-	func->used_types_hash = hash_set<tree>::create_ggc (37);
+  {
+    if (func->used_types_hash == NULL)
+      func->used_types_hash = hash_set<tree>::create_ggc (37);
 
-      func->used_types_hash->add (type);
-    }
+    func->used_types_hash->add (type);
+  }
 }
 
 /* Given a type, insert it into the used hash table in cfun.  */
@@ -6430,17 +6430,17 @@ used_types_insert (tree t)
       || TYPE_NAME (t) == TYPE_NAME (TYPE_MAIN_VARIANT (t)))
     t = TYPE_MAIN_VARIANT (t);
   if (debug_info_level > DINFO_LEVEL_NONE)
+  {
+    if (cfun)
+      used_types_insert_helper (t, cfun);
+    else
     {
-      if (cfun)
-	used_types_insert_helper (t, cfun);
-      else
-	{
-	  /* So this might be a type referenced by a global variable.
-	     Record that type so that we can later decide to emit its
-	     debug information.  */
-	  vec_safe_push (types_used_by_cur_var_decl, t);
-	}
+      /* So this might be a type referenced by a global variable.
+        Record that type so that we can later decide to emit its
+        debug information.  */
+      vec_safe_push (types_used_by_cur_var_decl, t);
     }
+  }
 }
 
 /* Helper to Hash a struct types_used_by_vars_entry.  */

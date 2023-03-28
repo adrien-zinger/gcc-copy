@@ -71,7 +71,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-pretty-print.h"
 #include "memmodel.h"
 #include "c-family/known-headers.h"
-/* #include "hashtab.h" */
 
 /* We need to walk over decls with incomplete struct/union/enum types
    after parsing the whole translation unit.
@@ -7829,7 +7828,7 @@ typedef struct binary_expr_stack {
 } binary_expr_stack_t;
 
 static void
-binary_expr_stack_trunc_div (binary_expr_stack_t *stack)
+binary_expr_stack_trunc_div (binary_expr_stack_t *stack, int sp)
 {
   if ((stack[sp - 1].expr.original_code == SIZEOF_EXPR
       || stack[sp - 1].expr.original_code == PAREN_SIZEOF_EXPR)
@@ -7869,21 +7868,21 @@ binary_expr_stack_trunc_div (binary_expr_stack_t *stack)
   }
 }
 
-static void
-pop_binary_expr_stack (binary_expr_stack_t *stack)
+static int
+pop_binary_expr_stack (binary_expr_stack_t *stack, c_parser *parser, int sp, tree omp_atomic_lhs)
 {
   switch (stack[sp].op)
   {
     case TRUTH_ANDIF_EXPR:
-      c_inhibit_evaluation_warnings -= (stack[sp - 1]->expr.value
+      c_inhibit_evaluation_warnings -= (stack[sp - 1].expr.value
           == truthvalue_false_node);
       break;
     case TRUTH_ORIF_EXPR:
-      c_inhibit_evaluation_warnings -= (stack[sp - 1]->expr.value
+      c_inhibit_evaluation_warnings -= (stack[sp - 1].expr.value
           == truthvalue_true_node);
       break;
     case TRUNC_DIV_EXPR:
-      binary_expr_stack_trunc_div(stack);
+      binary_expr_stack_trunc_div (stack, sp);
       break;
     default: break;
   }
@@ -7895,60 +7894,41 @@ pop_binary_expr_stack (binary_expr_stack_t *stack)
     = convert_lvalue_to_rvalue (stack[sp].loc,
         stack[sp].expr, true, true);
 
-  /* Check if it's not a omp atomic and */
-  int not_omp_atomic = __builtin_expect (omp_atomic_lhs != NULL_TREE, 0);
-  int has_2_elmts = sp == 1;
+  #define IS_PREC_AN_OPERATOR                          \
+      (1 << stack[1].prec)                             \
+      & ((1 << PREC_BITOR) | (1 << PREC_BITXOR)        \
+          | (1 << PREC_BITAND) | (1 << PREC_SHIFT)     \
+          | (1 << PREC_ADD) | (1 << PREC_MULT)         \
+          | (1 << PREC_EQ)) /* Why also '==' ?*/
 
-  int precedance_is_assignation = (1 << stack[sp].prec)
-    & ((1 << PREC_BITOR) | (1 << PREC_BITXOR)
-        | (1 << PREC_BITAND) | (1 << PREC_SHIFT)
-        | (1 << PREC_ADD) | (1 << PREC_MULT)
-        | (1 << PREC_EQ));
-  int next_is_semicolon = c_parser_next_token_is (parser, CPP_SEMICOLON);
+  #define IS_PREC_AN_OPERATOR_OR_IS_LATEST_EXPR                       \
+      ((c_parser_next_token_is (parser, CPP_SEMICOLON)                \
+      && IS_PREC_AN_OPERATOR)                                         \
+      || ((c_parser_next_token_is (parser, CPP_QUERY)                 \
+          || (omp_atomic_lhs == void_list_node                        \
+              && c_parser_next_token_is (parser, CPP_CLOSE_PAREN)))   \
+        && (stack[1].prec == PREC_REL || stack[1].prec == PREC_EQ)))
 
-/* 
-    if (
-      __builtin_expect (omp_atomic_lhs != NULL_TREE, 0)
-   && sp == 1
-   && (
-        ( // check if its not a relational or logical operator and it's the end of the expression
-             c_parser_next_token_is (parser, CPP_SEMICOLON)
-          && (
-                (1 << stack[sp].prec) & ((1 << PREC_BITOR) | (1 << PREC_BITXOR) | (1 << PREC_BITAND) | (1 << PREC_SHIFT) | (1 << PREC_ADD) | (1 << PREC_MULT) | (1 << PREC_EQ))
-             )
-        )
-        ||
-        ( // next is a kind of cpp query --> '?' or a close parenteses AND previous operation is relational (< > <= >=) or ==
-          (
-               c_parser_next_token_is (parser, CPP_QUERY)
-            ||  (
-                    omp_atomic_lhs == void_list_node 
-                  && c_parser_next_token_is (parser, CPP_CLOSE_PAREN)
-                )
-          )
-          &&
-          (
-              stack[sp].prec == PREC_REL
-            || stack[sp].prec == PREC_EQ
-          )
-        )
-      )
-   && stack[sp].op != TRUNC_MOD_EXPR
-   && stack[sp].op != GE_EXPR
-   && stack[sp].op != LE_EXPR
-   && stack[sp].op != NE_EXPR
+  /* Simplifies the latest expression if the stack size is 2 and we are
+    currently in an omp atomic directive. Then, check if the top element
+    on the stack does'nt require a additional elements. Otherwise, the
+    previous expression is set to the binary operation returned by
+    `parser_build_binary_op`.
 
-
-   && stack[0].expr.value != error_mark_node
-   && stack[1].expr.value != error_mark_node			      
-   && (omp_atomic_lhs == void_list_node				      
-      || c_tree_equal (stack[0].expr.value, omp_atomic_lhs)	      
-      || c_tree_equal (stack[1].expr.value, omp_atomic_lhs)	      
-      || (stack[sp].op == EQ_EXPR					      
-    && c_parser_peek_2nd_token (parser)->keyword == RID_IF)))
-*/
-
-  if (todo)
+    It is more probable that `omp_atomic_lhs != NULL_TREE` is false. */
+  if (__builtin_expect (omp_atomic_lhs != NULL_TREE, 0)
+      && sp == 1 && IS_PREC_AN_OPERATOR_OR_IS_LATEST_EXPR
+      && stack[1].op != TRUNC_MOD_EXPR
+      && stack[1].op != GE_EXPR
+      && stack[1].op != LE_EXPR
+      && stack[1].op != NE_EXPR /* Why not EQ_EXPR? */
+      && stack[0].expr.value != error_mark_node
+      && stack[1].expr.value != error_mark_node			      
+      && (omp_atomic_lhs == void_list_node				      
+        || c_tree_equal (stack[0].expr.value, omp_atomic_lhs)	      
+        || c_tree_equal (stack[1].expr.value, omp_atomic_lhs)	      
+        || (stack[1].op == EQ_EXPR					      
+            && c_parser_peek_2nd_token (parser)->keyword == RID_IF)))
   {
     tree t = make_node (stack[1].op);
     TREE_TYPE (t) = TREE_TYPE (stack[0].expr.value);
@@ -7963,7 +7943,93 @@ pop_binary_expr_stack (binary_expr_stack_t *stack)
               stack[sp - 1].expr,
               stack[sp].expr);
   }
-  sp--;
+  return --sp;
+
+  #undef is_prec_an_operator_or_latest_expr
+  #undef is_prec_an_operator
+}
+
+/* Because optional is a C++17 feature and it would have been conveniant here,
+   we defined a minimal version of it for prec_and_code */
+typedef std::tuple<enum c_parser_prec, enum tree_code> prec_and_code;
+class opt_prec_and_code {
+    union {
+        bool empty_byte;
+        prec_and_code value;
+    };
+    bool is_empty = true;
+
+    public:
+    opt_prec_and_code (void) {
+        this->empty_byte = false;
+    };
+    opt_prec_and_code (enum c_parser_prec &&oprec, enum tree_code &&ocode) {
+        this->value = {oprec, ocode};
+        this->is_empty = false;
+    };
+    prec_and_code operator*() {
+        return value;
+    }
+    bool operator!() const {
+        return this->is_empty;
+    }
+    static const opt_prec_and_code none() {
+        return opt_prec_and_code();
+    }
+};
+
+/* Get precedence and operation code from the next binary operation. Returns an
+   optional tuple with [ precedence, code ] into it. Or a nullopt if the next
+   token isn't a binary operation.
+*/
+
+static opt_prec_and_code
+c_parser_binary_operation_prec_and_code(c_parser *parser)
+{
+  #define RET(prec, code) opt_prec_and_code((prec), (enum tree_code) (code))
+  switch (c_parser_peek_token (parser)->type)
+  {
+    case CPP_MULT:
+      return RET(PREC_MULT, MULT_EXPR);
+    case CPP_DIV:
+      return RET(PREC_MULT, TRUNC_DIV_EXPR);
+    case CPP_MOD:
+      return RET(PREC_MULT, TRUNC_MOD_EXPR);
+    case CPP_PLUS:
+      return RET(PREC_ADD, PLUS_EXPR);
+    case CPP_MINUS:
+      return RET(PREC_ADD, MINUS_EXPR);
+    case CPP_LSHIFT:
+      return RET(PREC_SHIFT, LSHIFT_EXPR);
+    case CPP_RSHIFT:
+      return RET(PREC_SHIFT, RSHIFT_EXPR);
+    case CPP_LESS:
+      return RET(PREC_REL, LT_EXPR);
+    case CPP_GREATER:
+      return RET(PREC_REL, GT_EXPR);
+    case CPP_LESS_EQ:
+      return RET(PREC_REL, LE_EXPR);
+    case CPP_GREATER_EQ:
+      return RET(PREC_REL, GE_EXPR);
+    case CPP_EQ_EQ:
+      return RET(PREC_EQ, EQ_EXPR);
+    case CPP_NOT_EQ:
+      return RET(PREC_EQ, NE_EXPR);
+    case CPP_AND:
+      return RET(PREC_BITAND, BIT_AND_EXPR);
+    case CPP_XOR:
+      return RET(PREC_BITXOR, BIT_XOR_EXPR);
+    case CPP_OR:
+      return RET(PREC_BITOR, BIT_IOR_EXPR);
+    case CPP_AND_AND:
+      return RET(PREC_LOGAND, TRUTH_ANDIF_EXPR);
+    case CPP_OR_OR:
+      return RET(PREC_LOGOR, TRUTH_ORIF_EXPR);
+    default:
+      /* Not a binary operator */
+      return opt_prec_and_code::none();
+    }
+    #undef RET
 }
 
 /* Parse a binary expression; that is, a logical-OR-expression (C90
@@ -8032,7 +8098,6 @@ c_parser_binary_expression (c_parser *parser, struct c_expr *after,
 {
   binary_expr_stack_t stack[NUM_PRECS];
 
-  int sp;
   /* Location of the binary operator.  */
   location_t binary_loc = UNKNOWN_LOCATION;  /* Quiet warning.  */
 
@@ -8041,137 +8106,67 @@ c_parser_binary_expression (c_parser *parser, struct c_expr *after,
   stack[0].expr = c_parser_cast_expression (parser, after);
   stack[0].prec = PREC_NONE;
   stack[0].sizeof_arg = c_last_sizeof_arg;
-  sp = 0;
+  int sp = 0;
+
   while (true)
+  {
+    if (parser->error)
+      break;
+
+    opt_prec_and_code prec_and_code
+          = c_parser_binary_operation_prec_and_code (parser);
+    if (!prec_and_code)
+      /* Not binary operator, send of the binary expression */
+      break;
+
+    enum c_parser_prec oprec;
+    enum tree_code ocode;
+    std::tie (oprec, ocode) = *prec_and_code;
+
+    source_range src_range;
+    binary_loc = c_parser_peek_token (parser)->location;
+
+    /* Pop all highest precedences on the stack */
+    while (oprec <= stack[sp].prec)
+      sp = pop_binary_expr_stack (stack, parser, sp, omp_atomic_lhs);
+
+    c_parser_consume_token (parser);
+    switch (ocode)
     {
-      enum c_parser_prec oprec;
-      enum tree_code ocode;
-      source_range src_range;
-      if (parser->error)
-	goto out;
-      switch (c_parser_peek_token (parser)->type)
-	{
-	case CPP_MULT:
-	  oprec = PREC_MULT;
-	  ocode = MULT_EXPR;
-	  break;
-	case CPP_DIV:
-	  oprec = PREC_MULT;
-	  ocode = TRUNC_DIV_EXPR;
-	  break;
-	case CPP_MOD:
-	  oprec = PREC_MULT;
-	  ocode = TRUNC_MOD_EXPR;
-	  break;
-	case CPP_PLUS:
-	  oprec = PREC_ADD;
-	  ocode = PLUS_EXPR;
-	  break;
-	case CPP_MINUS:
-	  oprec = PREC_ADD;
-	  ocode = MINUS_EXPR;
-	  break;
-	case CPP_LSHIFT:
-	  oprec = PREC_SHIFT;
-	  ocode = LSHIFT_EXPR;
-	  break;
-	case CPP_RSHIFT:
-	  oprec = PREC_SHIFT;
-	  ocode = RSHIFT_EXPR;
-	  break;
-	case CPP_LESS:
-    printf("cpp less\n");
-	  oprec = PREC_REL;
-	  ocode = LT_EXPR;
-	  break;
-	case CPP_GREATER:
-	  oprec = PREC_REL;
-	  ocode = GT_EXPR;
-	  break;
-	case CPP_LESS_EQ:
-	  oprec = PREC_REL;
-	  ocode = LE_EXPR;
-	  break;
-	case CPP_GREATER_EQ:
-	  oprec = PREC_REL;
-	  ocode = GE_EXPR;
-	  break;
-	case CPP_EQ_EQ:
-	  oprec = PREC_EQ;
-	  ocode = EQ_EXPR;
-	  break;
-	case CPP_NOT_EQ:
-	  oprec = PREC_EQ;
-	  ocode = NE_EXPR;
-	  break;
-	case CPP_AND:
-	  oprec = PREC_BITAND;
-	  ocode = BIT_AND_EXPR;
-	  break;
-	case CPP_XOR:
-	  oprec = PREC_BITXOR;
-	  ocode = BIT_XOR_EXPR;
-	  break;
-	case CPP_OR:
-	  oprec = PREC_BITOR;
-	  ocode = BIT_IOR_EXPR;
-	  break;
-	case CPP_AND_AND:
-	  oprec = PREC_LOGAND;
-	  ocode = TRUTH_ANDIF_EXPR;
-	  break;
-	case CPP_OR_OR:
-	  oprec = PREC_LOGOR;
-	  ocode = TRUTH_ORIF_EXPR;
-	  break;
-	default:
-	  /* Not a binary operator, so end of the binary
-	     expression.  */
-	  goto out;
-	}
-      binary_loc = c_parser_peek_token (parser)->location;
-      while (oprec <= stack[sp].prec)
-	POP;
-      c_parser_consume_token (parser);
-      switch (ocode)
-	{
-	case TRUTH_ANDIF_EXPR:
-	  src_range = stack[sp].expr.src_range;
-	  stack[sp].expr
-	    = convert_lvalue_to_rvalue (stack[sp].loc,
-					stack[sp].expr, true, true);
-	  stack[sp].expr.value = c_objc_common_truthvalue_conversion
-	    (stack[sp].loc, default_conversion (stack[sp].expr.value));
-	  c_inhibit_evaluation_warnings += (stack[sp].expr.value
-					    == truthvalue_false_node);
-	  set_c_expr_source_range (&stack[sp].expr, src_range);
-	  break;
-	case TRUTH_ORIF_EXPR:
-	  src_range = stack[sp].expr.src_range;
-	  stack[sp].expr
-	    = convert_lvalue_to_rvalue (stack[sp].loc,
-					stack[sp].expr, true, true);
-	  stack[sp].expr.value = c_objc_common_truthvalue_conversion
-	    (stack[sp].loc, default_conversion (stack[sp].expr.value));
-	  c_inhibit_evaluation_warnings += (stack[sp].expr.value
-					    == truthvalue_true_node);
-	  set_c_expr_source_range (&stack[sp].expr, src_range);
-	  break;
-	default:
-	  break;
-	}
-      sp++;
-      stack[sp].loc = binary_loc;
-      stack[sp].expr = c_parser_cast_expression (parser, NULL);
-      stack[sp].prec = oprec;
-      stack[sp].op = ocode;
-      stack[sp].sizeof_arg = c_last_sizeof_arg;
+    case TRUTH_ANDIF_EXPR:
+      src_range = stack[sp].expr.src_range;
+      stack[sp].expr = convert_lvalue_to_rvalue (stack[sp].loc,
+            stack[sp].expr, true, true);
+      stack[sp].expr.value = c_objc_common_truthvalue_conversion
+        (stack[sp].loc, default_conversion (stack[sp].expr.value));
+      c_inhibit_evaluation_warnings += (stack[sp].expr.value
+                == truthvalue_false_node);
+      set_c_expr_source_range (&stack[sp].expr, src_range);
+      break;
+    case TRUTH_ORIF_EXPR:
+      src_range = stack[sp].expr.src_range;
+      stack[sp].expr = convert_lvalue_to_rvalue (stack[sp].loc,
+            stack[sp].expr, true, true);
+      stack[sp].expr.value = c_objc_common_truthvalue_conversion
+        (stack[sp].loc, default_conversion (stack[sp].expr.value));
+      c_inhibit_evaluation_warnings += (stack[sp].expr.value
+                == truthvalue_true_node);
+      set_c_expr_source_range (&stack[sp].expr, src_range);
+      break;
+    default:
+      break;
     }
- out:
+    sp++;
+    stack[sp].loc = binary_loc;
+    stack[sp].expr = c_parser_cast_expression (parser, NULL);
+    stack[sp].prec = oprec;
+    stack[sp].op = ocode;
+    stack[sp].sizeof_arg = c_last_sizeof_arg;
+  }
+  
   while (sp > 0)
-    POP;
+    sp = pop_binary_expr_stack (stack, parser, sp, omp_atomic_lhs);
   return stack[0].expr;
-#undef POP
 }
 
 /* Parse a cast expression (C90 6.3.4, C99 6.5.4, C11 6.5.4).  If AFTER
