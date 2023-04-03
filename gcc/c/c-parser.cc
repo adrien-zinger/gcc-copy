@@ -72,6 +72,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "memmodel.h"
 #include "c-family/known-headers.h"
 
+#include "print-tree.h"
+
 /* We need to walk over decls with incomplete struct/union/enum types
    after parsing the whole translation unit.
    In finish_decl(), if the decl is static, has incomplete
@@ -7016,7 +7018,13 @@ c_parser_for_statement (c_parser *parser, bool ivdep, unsigned short unroll,
   if (parens.require_open (parser))
   {
     c_parser_for_stmt_initialization (parser, &for_stmt);
+    printf("# Start parsing condition span\n");
     c_parser_for_stmt_conditions (parser, ivdep, unroll, &for_stmt);
+    printf("# Stop parsing condition span\n");
+    debug_tree(for_stmt.conditions);
+    printf("---\n");
+
+
     c_parser_for_stmt_increments (parser, &for_stmt);
     parens.skip_until_found_close (parser);
   }
@@ -7887,6 +7895,10 @@ pop_binary_expr_stack (binary_expr_stack_t *stack, c_parser *parser, int sp, tre
     default: break;
   }
 
+  printf ("binary expr before pop\n");
+  debug_tree (stack[sp - 1].expr.value);
+  debug_tree (stack[sp].expr.value);
+
   stack[sp - 1].expr
     = convert_lvalue_to_rvalue (stack[sp - 1].loc,
         stack[sp - 1].expr, true, true);
@@ -7923,11 +7935,11 @@ pop_binary_expr_stack (binary_expr_stack_t *stack, c_parser *parser, int sp, tre
       && stack[1].op != LE_EXPR
       && stack[1].op != NE_EXPR /* Why not EQ_EXPR? */
       && stack[0].expr.value != error_mark_node
-      && stack[1].expr.value != error_mark_node			      
-      && (omp_atomic_lhs == void_list_node				      
-        || c_tree_equal (stack[0].expr.value, omp_atomic_lhs)	      
-        || c_tree_equal (stack[1].expr.value, omp_atomic_lhs)	      
-        || (stack[1].op == EQ_EXPR					      
+      && stack[1].expr.value != error_mark_node
+      && (omp_atomic_lhs == void_list_node
+        || c_tree_equal (stack[0].expr.value, omp_atomic_lhs)
+        || c_tree_equal (stack[1].expr.value, omp_atomic_lhs)
+        || (stack[1].op == EQ_EXPR
             && c_parser_peek_2nd_token (parser)->keyword == RID_IF)))
   {
     tree t = make_node (stack[1].op);
@@ -8159,6 +8171,8 @@ c_parser_binary_expression (c_parser *parser, struct c_expr *after,
     sp++;
     stack[sp].loc = binary_loc;
     stack[sp].expr = c_parser_cast_expression (parser, NULL);
+    printf("stack expr\n");
+    debug_tree(stack[sp].expr.value);
     stack[sp].prec = oprec;
     stack[sp].op = ocode;
     stack[sp].sizeof_arg = c_last_sizeof_arg;
@@ -10827,33 +10841,37 @@ c_parser_expression (c_parser *parser)
   location_t tloc = c_parser_peek_token (parser)->location;
   struct c_expr expr;
   expr = c_parser_expr_no_commas (parser, NULL);
+
+  printf("no comma expression\n");
+  debug_tree(expr.value);
   if (c_parser_next_token_is (parser, CPP_COMMA))
     expr = convert_lvalue_to_rvalue (tloc, expr, true, false);
+
   while (c_parser_next_token_is (parser, CPP_COMMA))
+  {
+    struct c_expr next;
+    tree lhsval;
+    location_t loc = c_parser_peek_token (parser)->location;
+    location_t expr_loc;
+    c_parser_consume_token (parser);
+    expr_loc = c_parser_peek_token (parser)->location;
+    lhsval = expr.value;
+    while (TREE_CODE (lhsval) == COMPOUND_EXPR
+      || TREE_CODE (lhsval) == NOP_EXPR)
     {
-      struct c_expr next;
-      tree lhsval;
-      location_t loc = c_parser_peek_token (parser)->location;
-      location_t expr_loc;
-      c_parser_consume_token (parser);
-      expr_loc = c_parser_peek_token (parser)->location;
-      lhsval = expr.value;
-      while (TREE_CODE (lhsval) == COMPOUND_EXPR
-	     || TREE_CODE (lhsval) == NOP_EXPR)
-	{
-	  if (TREE_CODE (lhsval) == COMPOUND_EXPR)
-	    lhsval = TREE_OPERAND (lhsval, 1);
-	  else
-	    lhsval = TREE_OPERAND (lhsval, 0);
-	}
-      if (DECL_P (lhsval) || handled_component_p (lhsval))
-	mark_exp_read (lhsval);
-      next = c_parser_expr_no_commas (parser, NULL);
-      next = convert_lvalue_to_rvalue (expr_loc, next, true, false);
-      expr.value = build_compound_expr (loc, expr.value, next.value);
-      expr.original_code = COMPOUND_EXPR;
-      expr.original_type = next.original_type;
+      if (TREE_CODE (lhsval) == COMPOUND_EXPR)
+        lhsval = TREE_OPERAND (lhsval, 1);
+      else
+        lhsval = TREE_OPERAND (lhsval, 0);
     }
+    if (DECL_P (lhsval) || handled_component_p (lhsval))
+      mark_exp_read (lhsval);
+    next = c_parser_expr_no_commas (parser, NULL);
+    next = convert_lvalue_to_rvalue (expr_loc, next, true, false);
+    expr.value = build_compound_expr (loc, expr.value, next.value);
+    expr.original_code = COMPOUND_EXPR;
+    expr.original_type = next.original_type;
+  }
   return expr;
 }
 
