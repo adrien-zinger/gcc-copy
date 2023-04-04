@@ -6748,41 +6748,54 @@ c_parser_for_stmt_conditions (c_parser *parser, bool ivdep,
   if (for_stmt->is_foreach)
     return;
 
+  tree conditions;
   if (c_parser_next_token_is (parser, CPP_SEMICOLON))
   {
     if (ivdep)
     {
       c_parser_error (parser, "missing loop condition in loop "
             "with %<GCC ivdep%> pragma");
-      for_stmt->conditions = error_mark_node;
+      conditions = error_mark_node;
     }
     else if (unroll)
     {
       c_parser_error (parser, "missing loop condition in loop "
             "with %<GCC unroll%> pragma");
-      for_stmt->conditions = error_mark_node;
+      conditions = error_mark_node;
     }
     else
     {
       c_parser_consume_token (parser);
-      for_stmt->conditions = NULL_TREE;
+      conditions = NULL_TREE;
     }
   }
   else
   {
-    for_stmt->conditions = c_parser_condition (parser);
+    conditions = c_parser_condition (parser);
     c_parser_skip_until_found (parser, CPP_SEMICOLON,
         "expected %<;%>");
   }
 
-  if (ivdep && for_stmt->conditions != error_mark_node)
-    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (for_stmt->conditions), for_stmt->conditions,
+  if (ivdep && conditions != error_mark_node)
+    conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (conditions), conditions,
         build_int_cst (integer_type_node, annot_expr_ivdep_kind),
           integer_zero_node);
-  if (unroll && for_stmt->conditions != error_mark_node)
-    for_stmt->conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (for_stmt->conditions), for_stmt->conditions,
+  if (unroll && conditions != error_mark_node)
+    conditions = build3 (ANNOTATE_EXPR, TREE_TYPE (conditions), conditions,
         build_int_cst (integer_type_node, annot_expr_unroll_kind),
           build_int_cst (integer_type_node, unroll));
+
+  int len = TREE_OPERAND_LENGTH(conditions);
+  for (int i = 0; i < len; i++)
+  {
+    /* Buffer big enough to format a 32-bit UINT_MAX into, plus
+       the text.  */
+    printf ("condition arg:%d\n", i);
+    debug (TREE_OPERAND (conditions, i));
+    printf ("\n", i);
+  }
+
+  for_stmt->conditions = conditions;
 }
 
 /* Parse the init expression */
